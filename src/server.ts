@@ -51,7 +51,9 @@ app.post('/api/upload', upload.single('file'), (req: Request, res: Response) => 
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-
+   
+    console.info('Check parsed data:', jsonData);
+    
     if (jsonData.length === 0) {
       return res.status(400).json({ error: 'Файл порожній' });
     }
