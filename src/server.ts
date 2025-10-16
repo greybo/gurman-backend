@@ -8,7 +8,7 @@ import admin from 'firebase-admin';
 
 // Ініціалізація Firebase Admin
 // ВАЖЛИВО: Завантажте свій serviceAccountKey.json з Firebase Console
-const serviceAccount = require('../serviceAccountKey.json');
+const serviceAccount = require('./serviceAccountKey.json');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -17,7 +17,7 @@ admin.initializeApp({
 const db = admin.firestore();
 
 const app = express();
-const PORT = process.env.PORT || 3007;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
@@ -46,42 +46,71 @@ interface ExcelData {
   rowCount: number;
 }
 
+// Функція для конвертації rows в Firestore-сумісний формат
+function convertRowsForFirestore(headers: string[], rows: any[][]) {
+  return rows.map((row, index) => {
+    const rowObject: any = {
+      rowIndex: index,
+    };
+    
+    headers.forEach((header, headerIndex) => {
+      // Очищаємо назву поля від спецсимволів
+      const fieldName = `col_${headerIndex}`;
+      rowObject[fieldName] = row[headerIndex]?.toString() || '';
+    });
+    
+    return rowObject;
+  });
+}
+
+// Функція для генерації безпечного ID з імені файлу
+function generateDocumentId(fileName: string): string {
+  // Видаляємо розширення і спецсимволи
+  const baseName = fileName
+    .replace(/\.(xlsx|xls)$/i, '') // Видаляємо розширення
+    .replace(/[^a-zA-Z0-9_-]/g, '_') // Замінюємо спецсимволи на _
+    .toLowerCase();
+  
+  // Додаємо timestamp для унікальності
+  const timestamp = Date.now();
+  
+  return `${baseName}_${timestamp}`;
+}
+
 // Функція для збереження в Firestore
 async function saveToFirestore(data: ExcelData, documentId?: string) {
   try {
     const collectionRef = db.collection('excel_data');
-    console.info(`saveToFirestore: ${data.fileName}, documentId: ${documentId}`);
+    
+    // Конвертуємо вкладені масиви в об'єкти
+    const convertedRows = convertRowsForFirestore(data.headers, data.rows);
+    
     const docData = {
       fileName: data.fileName,
       headers: data.headers,
-      rows: data.rows,
+      rowsData: convertedRows,
       rowCount: data.rowCount,
       uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
-    console.info(`saveToFirestore:2  headers: ${docData.headers.length}, rows: ${docData.rows.length}`);
 
     let docRef;
+    let finalDocId: string;
+    
     if (documentId) {
-      console.info(`saveToFirestore:3 updating document ${documentId} start`);
-      // Оновлення існуючого документа
+      // Використовуємо переданий ID
+      finalDocId = documentId;
       docRef = collectionRef.doc(documentId);
-      await docRef.update({
-        ...docData,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      console.info(`saveToFirestore:3 updating document ${documentId} end`);
-
+      await docRef.set(docData, { merge: true });
     } else {
-      // Створення нового документа
-      console.info(`saveToFirestore:4 adding new document start ${JSON.stringify(docData)}`);
-
-      docRef = await collectionRef.add(docData);
-      console.info(`saveToFirestore:4 adding new document end`);
+      // Генеруємо ID з імені файлу
+      finalDocId = generateDocumentId(data.fileName);
+      docRef = collectionRef.doc(finalDocId);
+      await docRef.set(docData);
     }
 
     return {
-      id: docRef.id,
+      id: finalDocId,
       success: true,
       message: 'Дані успішно збережено в Firestore'
     };
@@ -97,6 +126,9 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     if (!req.file) {
       return res.status(400).json({ error: 'Файл не завантажено' });
     }
+
+    // ОтримуємоCustom ID з body (опціонально)
+    const customId = req.body.documentId;
 
     // Парсинг Excel
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
@@ -118,8 +150,8 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
       rowCount: rows.length
     };
 
-    // Збереження в Firestore
-    const firestoreResult = await saveToFirestore(excelData);// "test_excel_db"
+    // Збереження в Firestore з custom ID (якщо переданий)
+    const firestoreResult = await saveToFirestore(excelData, customId);
 
     res.json({
       ...excelData,
@@ -127,7 +159,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     });
   } catch (error) {
     console.error('Помилка обробки:', error);
-    res.status(500).json({
+    res.status(500).json({ 
       error: 'Помилка обробки файлу',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
@@ -156,6 +188,17 @@ app.get('/api/files', async (req: Request, res: Response) => {
   }
 });
 
+// Функція для конвертації назад в масиви (при читанні)
+function convertFirestoreToRows(headers: string[], rowsData: any[]) {
+  return rowsData.map(rowObj => {
+    const row: any[] = [];
+    headers.forEach((header, index) => {
+      row.push(rowObj[`col_${index}`] || '');
+    });
+    return row;
+  });
+}
+
 // Маршрут для отримання конкретного файлу
 app.get('/api/files/:id', async (req: Request, res: Response) => {
   try {
@@ -166,9 +209,19 @@ app.get('/api/files/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Файл не знайдено' });
     }
 
+    const data = doc.data();
+    
+    // Конвертуємо назад в масиви для клієнта
+    const rows = convertFirestoreToRows(data!.headers, data!.rowsData);
+
     res.json({
       id: doc.id,
-      ...doc.data()
+      fileName: data!.fileName,
+      headers: data!.headers,
+      rows: rows,
+      rowCount: data!.rowCount,
+      uploadedAt: data!.uploadedAt,
+      updatedAt: data!.updatedAt
     });
   } catch (error) {
     console.error('Помилка отримання файлу:', error);
@@ -191,18 +244,21 @@ app.delete('/api/files/:id', async (req: Request, res: Response) => {
 app.post('/api/search', async (req: Request, res: Response) => {
   try {
     const { searchTerm } = req.body;
-
+    
     if (!searchTerm) {
       return res.status(400).json({ error: 'Пошуковий запит відсутній' });
     }
 
-    // Отримати всі документи (в реальному проекті краще використовувати індексацію)
     const snapshot = await db.collection('excel_data').get();
     const results: any[] = [];
 
     snapshot.docs.forEach(doc => {
       const data = doc.data();
-      const matchingRows = data.rows.filter((row: any[]) =>
+      
+      // Конвертуємо назад в масиви для пошуку
+      const rows = convertFirestoreToRows(data.headers, data.rowsData);
+      
+      const matchingRows = rows.filter((row: any[]) =>
         row.some((cell: any) =>
           cell?.toString().toLowerCase().includes(searchTerm.toLowerCase())
         )
@@ -212,6 +268,7 @@ app.post('/api/search', async (req: Request, res: Response) => {
         results.push({
           id: doc.id,
           fileName: data.fileName,
+          headers: data.headers,
           matchingRows,
           matchCount: matchingRows.length
         });
@@ -227,39 +284,18 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     timestamp: new Date().toISOString(),
     firebase: 'Connected'
   });
 });
 
-// // Запуск сервера
-// app.listen(PORT, () => {
-//   console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
-//   console.log(`📊 API доступне на http://localhost:${PORT}/api`);
-//   console.log(`🔥 Firebase Firestore підключено`);
-// });
-
-// Замініть app.listen на:
-const startServer = async (port: number) => {
-  try {
-    app.listen(port, () => {
-      console.log(`🚀 Сервер запущено на http://localhost:${port}`);
-      console.log(`📊 API доступне на http://localhost:${port}/api`);
-      console.log(`🔥 Firebase Firestore підключено`);
-    });
-  } catch (error) {
-    if ((error as any).code === 'EADDRINUSE') {
-      console.log(`⚠️ Порт ${port} зайнятий, пробую ${port + 1}...`);
-      startServer(port + 1);
-    } else {
-      throw error;
-    }
-  }
-};
-
-startServer(Number(PORT));
-
+// Запуск сервера
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
+  console.log(`📊 API доступне на http://localhost:${PORT}/api`);
+  console.log(`🔥 Firebase Firestore підключено`);
+});
 
 export default app;
