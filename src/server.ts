@@ -17,7 +17,7 @@ admin.initializeApp({
 const db = admin.firestore();
 
 const app = express();
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3007;
 
 // Middleware
 app.use(cors());
@@ -50,7 +50,7 @@ interface ExcelData {
 async function saveToFirestore(data: ExcelData, documentId?: string) {
   try {
     const collectionRef = db.collection('excel_data');
-    
+    console.info(`saveToFirestore: ${data.fileName}, documentId: ${documentId}`);
     const docData = {
       fileName: data.fileName,
       headers: data.headers,
@@ -59,18 +59,25 @@ async function saveToFirestore(data: ExcelData, documentId?: string) {
       uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
+    console.info(`saveToFirestore:2  headers: ${docData.headers.length}, rows: ${docData.rows.length}`);
 
     let docRef;
     if (documentId) {
+      console.info(`saveToFirestore:3 updating document ${documentId} start`);
       // Оновлення існуючого документа
       docRef = collectionRef.doc(documentId);
       await docRef.update({
         ...docData,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
+      console.info(`saveToFirestore:3 updating document ${documentId} end`);
+
     } else {
       // Створення нового документа
+      console.info(`saveToFirestore:4 adding new document start ${JSON.stringify(docData)}`);
+
       docRef = await collectionRef.add(docData);
+      console.info(`saveToFirestore:4 adding new document end`);
     }
 
     return {
@@ -112,7 +119,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     };
 
     // Збереження в Firestore
-    const firestoreResult = await saveToFirestore(excelData);
+    const firestoreResult = await saveToFirestore(excelData);// "test_excel_db"
 
     res.json({
       ...excelData,
@@ -120,7 +127,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     });
   } catch (error) {
     console.error('Помилка обробки:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Помилка обробки файлу',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
@@ -184,7 +191,7 @@ app.delete('/api/files/:id', async (req: Request, res: Response) => {
 app.post('/api/search', async (req: Request, res: Response) => {
   try {
     const { searchTerm } = req.body;
-    
+
     if (!searchTerm) {
       return res.status(400).json({ error: 'Пошуковий запит відсутній' });
     }
@@ -220,18 +227,39 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     firebase: 'Connected'
   });
 });
 
-// Запуск сервера
-app.listen(PORT, () => {
-  console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
-  console.log(`📊 API доступне на http://localhost:${PORT}/api`);
-  console.log(`🔥 Firebase Firestore підключено`);
-});
+// // Запуск сервера
+// app.listen(PORT, () => {
+//   console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
+//   console.log(`📊 API доступне на http://localhost:${PORT}/api`);
+//   console.log(`🔥 Firebase Firestore підключено`);
+// });
+
+// Замініть app.listen на:
+const startServer = async (port: number) => {
+  try {
+    app.listen(port, () => {
+      console.log(`🚀 Сервер запущено на http://localhost:${port}`);
+      console.log(`📊 API доступне на http://localhost:${port}/api`);
+      console.log(`🔥 Firebase Firestore підключено`);
+    });
+  } catch (error) {
+    if ((error as any).code === 'EADDRINUSE') {
+      console.log(`⚠️ Порт ${port} зайнятий, пробую ${port + 1}...`);
+      startServer(port + 1);
+    } else {
+      throw error;
+    }
+  }
+};
+
+startServer(Number(PORT));
+
 
 export default app;
