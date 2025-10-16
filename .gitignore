@@ -24,3 +24,10 @@ dist-ssr
 *.sw?
 .package-lock.json
 package-lock.json
+serviceAccountKey.json
+.env
+.env.local
+.env.*.local
+coverage
+
+dist/

@@ -4,15 +4,26 @@ import multer from 'multer';
 import XLSX from 'xlsx';
 import cors from 'cors';
 import path from 'path';
+import admin from 'firebase-admin';
+
+// Ініціалізація Firebase Admin
+// ВАЖЛИВО: Завантажте свій serviceAccountKey.json з Firebase Console
+const serviceAccount = require('../serviceAccountKey.json');
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const db = admin.firestore();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Налаштування multer для завантаження файлів
+// Налаштування multer
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
@@ -35,25 +46,57 @@ interface ExcelData {
   rowCount: number;
 }
 
-interface ParsedSheet {
-  sheetName: string;
-  data: ExcelData;
+// Функція для збереження в Firestore
+async function saveToFirestore(data: ExcelData, documentId?: string) {
+  try {
+    const collectionRef = db.collection('excel_data');
+    
+    const docData = {
+      fileName: data.fileName,
+      headers: data.headers,
+      rows: data.rows,
+      rowCount: data.rowCount,
+      uploadedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    let docRef;
+    if (documentId) {
+      // Оновлення існуючого документа
+      docRef = collectionRef.doc(documentId);
+      await docRef.update({
+        ...docData,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } else {
+      // Створення нового документа
+      docRef = await collectionRef.add(docData);
+    }
+
+    return {
+      id: docRef.id,
+      success: true,
+      message: 'Дані успішно збережено в Firestore'
+    };
+  } catch (error) {
+    console.error('Помилка збереження в Firestore:', error);
+    throw error;
+  }
 }
 
-// Маршрут для завантаження та парсингу Excel
-app.post('/api/upload', upload.single('file'), (req: Request, res: Response) => {
+// Маршрут для завантаження та збереження Excel
+app.post('/api/upload', upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Файл не завантажено' });
     }
 
+    // Парсинг Excel
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-   
-    console.info('Check parsed data:', jsonData);
-    
+
     if (jsonData.length === 0) {
       return res.status(400).json({ error: 'Файл порожній' });
     }
@@ -61,73 +104,114 @@ app.post('/api/upload', upload.single('file'), (req: Request, res: Response) => 
     const headers = jsonData[0];
     const rows = jsonData.slice(1);
 
-    const response: ExcelData = {
+    const excelData: ExcelData = {
       headers,
       rows,
       fileName: req.file.originalname,
       rowCount: rows.length
     };
 
-    res.json(response);
+    // Збереження в Firestore
+    const firestoreResult = await saveToFirestore(excelData);
+
+    res.json({
+      ...excelData,
+      firestore: firestoreResult
+    });
   } catch (error) {
-    console.error('Помилка парсингу:', error);
-    res.status(500).json({ error: 'Помилка обробки файлу' });
+    console.error('Помилка обробки:', error);
+    res.status(500).json({ 
+      error: 'Помилка обробки файлу',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 });
 
-// Маршрут для завантаження всіх листів
-app.post('/api/upload/all-sheets', upload.single('file'), (req: Request, res: Response) => {
+// Маршрут для отримання списку всіх завантажених файлів
+app.get('/api/files', async (req: Request, res: Response) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Файл не завантажено' });
+    const snapshot = await db.collection('excel_data')
+      .orderBy('uploadedAt', 'desc')
+      .get();
+
+    const files = snapshot.docs.map(doc => ({
+      id: doc.id,
+      fileName: doc.data().fileName,
+      rowCount: doc.data().rowCount,
+      uploadedAt: doc.data().uploadedAt,
+      updatedAt: doc.data().updatedAt
+    }));
+
+    res.json({ files, count: files.length });
+  } catch (error) {
+    console.error('Помилка отримання файлів:', error);
+    res.status(500).json({ error: 'Помилка отримання даних' });
+  }
+});
+
+// Маршрут для отримання конкретного файлу
+app.get('/api/files/:id', async (req: Request, res: Response) => {
+  try {
+    const docRef = db.collection('excel_data').doc(req.params.id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: 'Файл не знайдено' });
     }
 
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheets: ParsedSheet[] = [];
+    res.json({
+      id: doc.id,
+      ...doc.data()
+    });
+  } catch (error) {
+    console.error('Помилка отримання файлу:', error);
+    res.status(500).json({ error: 'Помилка отримання даних' });
+  }
+});
 
-    workbook.SheetNames.forEach((sheetName) => {
-      const worksheet = workbook.Sheets[sheetName];
-      const jsonData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+// Маршрут для видалення файлу
+app.delete('/api/files/:id', async (req: Request, res: Response) => {
+  try {
+    await db.collection('excel_data').doc(req.params.id).delete();
+    res.json({ success: true, message: 'Файл видалено' });
+  } catch (error) {
+    console.error('Помилка видалення:', error);
+    res.status(500).json({ error: 'Помилка видалення файлу' });
+  }
+});
 
-      if (jsonData.length > 0) {
-        const headers = jsonData[0];
-        const rows = jsonData.slice(1);
+// Маршрут для пошуку в Firestore
+app.post('/api/search', async (req: Request, res: Response) => {
+  try {
+    const { searchTerm } = req.body;
+    
+    if (!searchTerm) {
+      return res.status(400).json({ error: 'Пошуковий запит відсутній' });
+    }
 
-        sheets.push({
-          sheetName,
-          data: {
-            headers,
-            rows,
-            fileName: req.file!.originalname,
-            rowCount: rows.length
-          }
+    // Отримати всі документи (в реальному проекті краще використовувати індексацію)
+    const snapshot = await db.collection('excel_data').get();
+    const results: any[] = [];
+
+    snapshot.docs.forEach(doc => {
+      const data = doc.data();
+      const matchingRows = data.rows.filter((row: any[]) =>
+        row.some((cell: any) =>
+          cell?.toString().toLowerCase().includes(searchTerm.toLowerCase())
+        )
+      );
+
+      if (matchingRows.length > 0) {
+        results.push({
+          id: doc.id,
+          fileName: data.fileName,
+          matchingRows,
+          matchCount: matchingRows.length
         });
       }
     });
 
-    res.json({ sheets, totalSheets: sheets.length });
-  } catch (error) {
-    console.error('Помилка парсингу:', error);
-    res.status(500).json({ error: 'Помилка обробки файлу' });
-  }
-});
-
-// Маршрут для пошуку в даних
-app.post('/api/search', express.json(), (req: Request, res: Response) => {
-  try {
-    const { data, searchTerm } = req.body;
-
-    if (!data || !Array.isArray(data)) {
-      return res.status(400).json({ error: 'Невірний формат даних' });
-    }
-
-    const filtered = data.filter((row: any[]) =>
-      row.some((cell) =>
-        cell?.toString().toLowerCase().includes(searchTerm.toLowerCase())
-      )
-    );
-
-    res.json({ results: filtered, count: filtered.length });
+    res.json({ results, totalMatches: results.length });
   } catch (error) {
     console.error('Помилка пошуку:', error);
     res.status(500).json({ error: 'Помилка пошуку' });
@@ -136,13 +220,18 @@ app.post('/api/search', express.json(), (req: Request, res: Response) => {
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    firebase: 'Connected'
+  });
 });
 
 // Запуск сервера
 app.listen(PORT, () => {
   console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
   console.log(`📊 API доступне на http://localhost:${PORT}/api`);
+  console.log(`🔥 Firebase Firestore підключено`);
 });
 
 export default app;

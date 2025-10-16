@@ -1,7 +1,7 @@
 {
   "name": "excel-parser-backend",
   "version": "1.0.0",
-  "description": "Backend для парсингу Excel файлів",
+  "description": "Backend для парсингу Excel файлів з Firebase Firestore",
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
@@ -11,6 +11,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "firebase-admin": "^12.7.0",
     "multer": "^1.4.5-lts.1",
     "xlsx": "^0.18.5"
   },
