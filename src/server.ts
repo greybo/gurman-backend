@@ -6,39 +6,46 @@ import cors from 'cors';
 import path from 'path';
 import admin from 'firebase-admin';
 
-
-// const serviceAccount = require('./serviceAccountKey.json');
-
-// admin.initializeApp({
-//   credential: admin.credential.cert(serviceAccount)
-// });
-
 // Ініціалізація Firebase Admin
-if (process.env.NODE_ENV === 'production') {
-  // Production - використовуємо змінні оточення
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    })
-  });
-} else {
-  // Development - використовуємо файл
-  const serviceAccount = require("../serviceAccountKey.json");
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    // Production - використовуємо закодований в base64 JSON
+    const serviceAccountJson = Buffer.from(
+      process.env.FIREBASE_SERVICE_ACCOUNT,
+      'base64'
+    ).toString('utf-8');
+    
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+  } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_PRIVATE_KEY) {
+    // Альтернатива: окремі змінні з правильною обробкою newline
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      })
+    });
+  } else {
+    // Development - файл
+    const serviceAccount = require("./serviceAccountKey.json");
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+  }
+} catch (error) {
+  console.error('Firebase initialization error:', error);
+  process.exit(1);
 }
 
 const db = admin.firestore();
-
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-
 // Middleware
-// app.use(cors());
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -62,7 +69,7 @@ const upload = multer({
       cb(new Error('Тільки Excel файли дозволені'));
     }
   },
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 // Типи
@@ -73,7 +80,6 @@ interface ExcelData {
   rowCount: number;
 }
 
-// Функція для конвертації rows в Firestore-сумісний формат
 function convertRowsForFirestore(headers: string[], rows: any[][]) {
   return rows.map((row, index) => {
     const rowObject: any = {
@@ -81,7 +87,6 @@ function convertRowsForFirestore(headers: string[], rows: any[][]) {
     };
 
     headers.forEach((header, headerIndex) => {
-      // Очищаємо назву поля від спецсимволів
       const fieldName = `col_${headerIndex}`;
       rowObject[fieldName] = row[headerIndex]?.toString() || '';
     });
@@ -90,26 +95,19 @@ function convertRowsForFirestore(headers: string[], rows: any[][]) {
   });
 }
 
-// Функція для генерації безпечного ID з імені файлу
 function generateDocumentId(fileName: string): string {
-  // Видаляємо розширення і спецсимволи
   const baseName = fileName
-    .replace(/\.(xlsx|xls)$/i, '') // Видаляємо розширення
-    .replace(/[^a-zA-Z0-9_-]/g, '_') // Замінюємо спецсимволи на _
+    .replace(/\.(xlsx|xls)$/i, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
     .toLowerCase();
 
-  // Додаємо timestamp для унікальності
   const timestamp = Date.now();
-
   return `${baseName}_${timestamp}`;
 }
 
-// Функція для збереження в Firestore
 async function saveToFirestore(data: ExcelData, documentId?: string) {
   try {
     const collectionRef = db.collection('excel_data');
-
-    // Конвертуємо вкладені масиви в об'єкти
     const convertedRows = convertRowsForFirestore(data.headers, data.rows);
 
     const docData = {
@@ -121,19 +119,14 @@ async function saveToFirestore(data: ExcelData, documentId?: string) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
 
-    let docRef;
     let finalDocId: string;
 
     if (documentId) {
-      // Використовуємо переданий ID
       finalDocId = documentId;
-      docRef = collectionRef.doc(documentId);
-      await docRef.set(docData, { merge: true });
+      await collectionRef.doc(documentId).set(docData, { merge: true });
     } else {
-      // Генеруємо ID з імені файлу
       finalDocId = generateDocumentId(data.fileName);
-      docRef = collectionRef.doc(finalDocId);
-      await docRef.set(docData);
+      await collectionRef.doc(finalDocId).set(docData);
     }
 
     return {
@@ -142,22 +135,19 @@ async function saveToFirestore(data: ExcelData, documentId?: string) {
       message: 'Дані успішно збережено в Firestore'
     };
   } catch (error) {
-    console.error('Помилка збереження в Firestore:', error);
+    console.error('Firebase save error:', error);
     throw error;
   }
 }
 
-// Маршрут для завантаження та збереження Excel
 app.post('/api/upload', upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Файл не завантажено' });
     }
 
-    // ОтримуємоCustom ID з body (опціонально)
     const customId = req.body.documentId;
 
-    // Парсинг Excel
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
@@ -173,11 +163,10 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     const excelData: ExcelData = {
       headers,
       rows,
-      fileName: customId,//req.file.originalname,
+      fileName: customId,
       rowCount: rows.length
     };
 
-    // Збереження в Firestore з custom ID (якщо переданий)
     const firestoreResult = await saveToFirestore(excelData, customId);
 
     res.json({
@@ -185,7 +174,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
       firestore: firestoreResult
     });
   } catch (error) {
-    console.error('Помилка обробки:', error);
+    console.error('Upload error:', error);
     res.status(500).json({
       error: 'Помилка обробки файлу',
       details: error instanceof Error ? error.message : 'Unknown error'
@@ -193,7 +182,6 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
   }
 });
 
-// Маршрут для отримання списку всіх завантажених файлів
 app.get('/api/files', async (req: Request, res: Response) => {
   try {
     const snapshot = await db.collection('excel_data')
@@ -210,12 +198,11 @@ app.get('/api/files', async (req: Request, res: Response) => {
 
     res.json({ files, count: files.length });
   } catch (error) {
-    console.error('Помилка отримання файлів:', error);
+    console.error('Get files error:', error);
     res.status(500).json({ error: 'Помилка отримання даних' });
   }
 });
 
-// Функція для конвертації назад в масиви (при читанні)
 function convertFirestoreToRows(headers: string[], rowsData: any[]) {
   return rowsData.map(rowObj => {
     const row: any[] = [];
@@ -226,7 +213,6 @@ function convertFirestoreToRows(headers: string[], rowsData: any[]) {
   });
 }
 
-// Маршрут для отримання конкретного файлу
 app.get('/api/files/:id', async (req: Request, res: Response) => {
   try {
     const docRef = db.collection('excel_data').doc(req.params.id);
@@ -237,8 +223,6 @@ app.get('/api/files/:id', async (req: Request, res: Response) => {
     }
 
     const data = doc.data();
-
-    // Конвертуємо назад в масиви для клієнта
     const rows = convertFirestoreToRows(data!.headers, data!.rowsData);
 
     res.json({
@@ -251,23 +235,21 @@ app.get('/api/files/:id', async (req: Request, res: Response) => {
       updatedAt: data!.updatedAt
     });
   } catch (error) {
-    console.error('Помилка отримання файлу:', error);
+    console.error('Get file error:', error);
     res.status(500).json({ error: 'Помилка отримання даних' });
   }
 });
 
-// Маршрут для видалення файлу
 app.delete('/api/files/:id', async (req: Request, res: Response) => {
   try {
     await db.collection('excel_data').doc(req.params.id).delete();
     res.json({ success: true, message: 'Файл видалено' });
   } catch (error) {
-    console.error('Помилка видалення:', error);
+    console.error('Delete error:', error);
     res.status(500).json({ error: 'Помилка видалення файлу' });
   }
 });
 
-// Маршрут для пошуку в Firestore
 app.post('/api/search', async (req: Request, res: Response) => {
   try {
     const { searchTerm } = req.body;
@@ -281,8 +263,6 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
     snapshot.docs.forEach(doc => {
       const data = doc.data();
-
-      // Конвертуємо назад в масиви для пошуку
       const rows = convertFirestoreToRows(data.headers, data.rowsData);
 
       const matchingRows = rows.filter((row: any[]) =>
@@ -304,12 +284,11 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
     res.json({ results, totalMatches: results.length });
   } catch (error) {
-    console.error('Помилка пошуку:', error);
+    console.error('Search error:', error);
     res.status(500).json({ error: 'Помилка пошуку' });
   }
 });
 
-// Health check
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'OK',
@@ -318,11 +297,10 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
-// Запуск сервера
 app.listen(PORT, () => {
-  console.log(`🚀 Сервер запущено на http://localhost:${PORT}`);
-  console.log(`📊 API доступне на http://localhost:${PORT}/api`);
-  console.log(`🔥 Firebase Firestore підключено`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`📊 API available at http://localhost:${PORT}/api`);
+  console.log(`🔥 Firebase Firestore connected`);
 });
 
 export default app;
