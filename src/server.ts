@@ -6,27 +6,48 @@ import cors from 'cors';
 import path from 'path';
 import admin from 'firebase-admin';
 
-// Ініціалізація Firebase Admin
-// ВАЖЛИВО: Завантажте свій serviceAccountKey.json з Firebase Console
-const serviceAccount = require('./serviceAccountKey.json');
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+// const serviceAccount = require('./serviceAccountKey.json');
+
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount)
+// });
+
+// Ініціалізація Firebase Admin
+if (process.env.NODE_ENV === 'production') {
+  // Production - використовуємо змінні оточення
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    })
+  });
+} else {
+  // Development - використовуємо файл
+  const serviceAccount = require("../serviceAccountKey.json");
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
 
 const db = admin.firestore();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+
 // Middleware
+// app.use(cors());
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'https://gurman-admin.vercel.app' // Додайте ваш домен
-  ]
+    'http://localhost:3000',
+    'https://gurman-admin.vercel.app', 
+    process.env.FRONTEND_URL || '*'
+  ],
+  credentials: true
 }));
-// app.use(cors());
 app.use(express.json());
 
 // Налаштування multer
