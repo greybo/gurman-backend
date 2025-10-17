@@ -52,13 +52,13 @@ function convertRowsForFirestore(headers: string[], rows: any[][]) {
     const rowObject: any = {
       rowIndex: index,
     };
-    
+
     headers.forEach((header, headerIndex) => {
       // Очищаємо назву поля від спецсимволів
       const fieldName = `col_${headerIndex}`;
       rowObject[fieldName] = row[headerIndex]?.toString() || '';
     });
-    
+
     return rowObject;
   });
 }
@@ -70,10 +70,10 @@ function generateDocumentId(fileName: string): string {
     .replace(/\.(xlsx|xls)$/i, '') // Видаляємо розширення
     .replace(/[^a-zA-Z0-9_-]/g, '_') // Замінюємо спецсимволи на _
     .toLowerCase();
-  
+
   // Додаємо timestamp для унікальності
   const timestamp = Date.now();
-  
+
   return `${baseName}_${timestamp}`;
 }
 
@@ -81,10 +81,10 @@ function generateDocumentId(fileName: string): string {
 async function saveToFirestore(data: ExcelData, documentId?: string) {
   try {
     const collectionRef = db.collection('excel_data');
-    
+
     // Конвертуємо вкладені масиви в об'єкти
     const convertedRows = convertRowsForFirestore(data.headers, data.rows);
-    
+
     const docData = {
       fileName: data.fileName,
       headers: data.headers,
@@ -96,7 +96,7 @@ async function saveToFirestore(data: ExcelData, documentId?: string) {
 
     let docRef;
     let finalDocId: string;
-    
+
     if (documentId) {
       // Використовуємо переданий ID
       finalDocId = documentId;
@@ -146,7 +146,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     const excelData: ExcelData = {
       headers,
       rows,
-      fileName: req.file.originalname,
+      fileName: customId,//req.file.originalname,
       rowCount: rows.length
     };
 
@@ -159,7 +159,7 @@ app.post('/api/upload', upload.single('file'), async (req: Request, res: Respons
     });
   } catch (error) {
     console.error('Помилка обробки:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: 'Помилка обробки файлу',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
@@ -210,7 +210,7 @@ app.get('/api/files/:id', async (req: Request, res: Response) => {
     }
 
     const data = doc.data();
-    
+
     // Конвертуємо назад в масиви для клієнта
     const rows = convertFirestoreToRows(data!.headers, data!.rowsData);
 
@@ -244,7 +244,7 @@ app.delete('/api/files/:id', async (req: Request, res: Response) => {
 app.post('/api/search', async (req: Request, res: Response) => {
   try {
     const { searchTerm } = req.body;
-    
+
     if (!searchTerm) {
       return res.status(400).json({ error: 'Пошуковий запит відсутній' });
     }
@@ -254,10 +254,10 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
     snapshot.docs.forEach(doc => {
       const data = doc.data();
-      
+
       // Конвертуємо назад в масиви для пошуку
       const rows = convertFirestoreToRows(data.headers, data.rowsData);
-      
+
       const matchingRows = rows.filter((row: any[]) =>
         row.some((cell: any) =>
           cell?.toString().toLowerCase().includes(searchTerm.toLowerCase())
@@ -284,8 +284,8 @@ app.post('/api/search', async (req: Request, res: Response) => {
 
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     firebase: 'Connected'
   });
